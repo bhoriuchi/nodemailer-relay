@@ -1,15 +1,20 @@
 import nodemailer from '../index';
+// process.env.DEBUG_NODEMAILER_RELAY = 'true';
 
 nodemailer.relay({
-  mail: {
-    from: 'bhoriuchi@gmail.com',
-    to: 'bhoriuchi@gmail.com',
-    subject: 'test forward',
-    text: 'message body'
-  }
+  from: 'bhoriuchi@gmail.com',
+  to: 'bhoriuchi@gmail.com',
+  subject: 'test forward',
+  text: 'message body'
 }, (err, info) => {
   if (err) {
-    return console.log(err);
+    return console.log('cb:', { err });
   }
-  console.log(JSON.stringify(info, null, '  '));
+  console.log('cb:', JSON.stringify(info, null, '  '));
+})
+.then(r => {
+  console.log(JSON.stringify(r, null, '  '));
+})
+.catch(err => {
+  console.error({ err });
 });

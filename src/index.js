@@ -5,6 +5,38 @@ import dns from 'dns';
 const SMTP_PORT = 25;
 
 /**
+ * Simple debugging method
+ * @param {*} message
+ */
+function debug(message) {
+  if (process.env.DEBUG_NODEMAILER_RELAY) {
+    process.stdout.write(JSON.stringify(message, null, '  ') + '\n\n');
+  }
+}
+
+/**
+ * Collection map using Promise
+ * @param {*} collection
+ * @param {*} iteratee
+ */
+function promiseMap(collection, iteratee) {
+  const mapResult = [];
+  return Promise.all(
+    _.map(collection, (value, key) => {
+      try {
+        return Promise.resolve(iteratee(value, key, collection))
+          .then(result => {
+            mapResult[key] = result;
+          });
+      } catch (err) {
+        return Promise.reject(err);
+      }
+    })
+  )
+  .then(() => mapResult);
+}
+
+/**
  * resolveMx using promises
  * @param {*} hostname
  */
@@ -54,12 +86,13 @@ function mapDomains(addr, domainMap) {
  * @param {*} domainMap
  */
 function lookupMx(domainMap) {
-  const resolves = _.map(domainMap, (data, domain) => {
-    return resolveMxAsync(domain).then(addresses => {
-      data.mx = _.sortBy(addresses, [ 'priority' ]);
-    });
-  });
-  return Promise.all(resolves).then(() => domainMap);
+  return Promise.all(
+    _.map(domainMap, (data, domain) => {
+      return resolveMxAsync(domain).then(addresses => {
+        data.mx = _.sortBy(addresses, [ 'priority' ]);
+      });
+    })
+  ).then(() => domainMap);
 }
 
 /**
@@ -75,116 +108,127 @@ function lookupMx(domainMap) {
  * @param {*} resolve
  * @param {*} reject
  */
-function sendMail(
-  addr,
-  to,
-  cc,
-  mailOpts,
-  relayOpts,
-  mx,
-  sendInfo,
-  resolve,
-  reject
-) {
+function sendMail(mail, transportOptions, mx, summary, resolve) {
+  const to = _.get(mail, 'envelope.to');
   if (!mx.length) {
-    sendInfo.push('failed to send to: ' + to);
+    summary.push('failed to send to: ' + to);
     return resolve();
   }
-  const host = mx.shift();
-
+  const host = _.get(mx.shift(), 'exchange');
   const transporter = nodemailer.createTransport(
-    _.merge({ port: SMTP_PORT }, relayOpts, {
-      host: host.exchange
-    })
+    _.merge({ port: SMTP_PORT }, transportOptions, { host })
   );
 
-  transporter.sendMail(
-    _.merge({}, mailOpts, {
-      to,
-      cc,
-      bcc: null
-    }),
-    (err, info) => {
-      if (err) {
-        if (err.message.match(/ENOTFOUND/)) {
-          return sendMail(
-            addr,
-            to,
-            cc,
-            mailOpts,
-            relayOpts,
-            mx,
-            sendInfo,
-            resolve,
-            reject
-          );
-        }
-        sendInfo.push({ to, info: err.message });
-        return reject();
+  transporter.sendMail(mail, (error, info) => {
+    if (error) {
+      debug({ sendError: error });
+      if (!error.message.match(/ENOTFOUND/)) {
+        summary.push({ to, info: error });
+        return resolve(); // stop trying to process if an email error
       }
-      sendInfo.push({ to, info });
-      return resolve();
+      return sendMail(mail, transportOptions, mx, summary, resolve);
     }
-  );
+    summary.push({ to, info });
+    return resolve();
+  });
 }
 
 /**
- * Main method for sending a relay message
- * @param {*} relayOptions
+ * Calls sendMail and returns a promise
+ * @param {*} mail
+ * @param {*} transportOptions
+ * @param {*} mx
+ * @param {*} summary
+ */
+function send(mail, transportOptions, mx, summary) {
+  debug({
+    sending: {
+      mail,
+      transportOptions
+    }
+  });
+  return new Promise(resolve => {
+    sendMail(mail, transportOptions, mx, summary, resolve);
+  });
+}
+
+/**
+ * Relay method to send a mail using SMTP relays that are looked up
+ * using mx records
+ * @param {*} mailOptions
+ * @param {*} transportOptions
  * @param {*} callback
  */
-function relay(relayOptions, callback) {
-  const cb = _.isFunction(callback) ? callback : _.noop;
+function relay(mailOptions, transportOptions, callback) {
+  let topts = transportOptions;
+  let cb = callback;
 
-  try {
-    const opts = Object.assign({}, relayOptions);
-    const mailOpts = Object.assign({}, opts.mail);
-    const relayOpts = Object.assign({}, opts.transport);
-    const sendInfo = [];
-    const domainMap = {};
-    const from = mailOpts.from;
+  if (_.isFunction(topts)) {
+    cb = topts;
+    topts = {};
+  }
 
-    // get to and cc addresses for the header
-    const to = toArray(mailOpts.to).join(', ');
-    const cc = toArray(mailOpts.cc).join(', ');
+  topts = Object.assign({}, topts);
+  cb = _.isFunction(cb) ? cb : _.noop;
 
-    // map the email addresses to their domains
-    mapDomains(mailOpts.to, domainMap);
-    mapDomains(mailOpts.cc, domainMap);
-    mapDomains(mailOpts.bcc, domainMap);
+  return new Promise((resolve, reject) => {
+    try {
+      if (!_.isPlainObject(mailOptions)) {
+        const moptsErr = new Error('mailOptions should be an object');
+        cb(moptsErr);
+        return reject(moptsErr);
+      }
 
-    // lookup mx records for each domain asynchronously
-    lookupMx(domainMap).then(results => {
-      const domains = _.map(results, ({ addrs, mx }) => {
-        const sends = _.map(addrs, addr => {
-          return new Promise((resolve, reject) => {
-            const o = _.merge({}, mailOpts, {
-              envelope: { from, to: addr, cc: '', bcc: '' }
-            });
-            sendMail(
-              addr,
+      const summary = [];
+      const domainMap = {};
+      const from = mailOptions.from;
+
+      // get to and cc addresses for the header
+      const to = toArray(mailOptions.to).join(', ');
+      const cc = toArray(mailOptions.cc).join(', ');
+
+      // map the email addresses to their domains
+      mapDomains(mailOptions.to, domainMap);
+      mapDomains(mailOptions.cc, domainMap);
+      mapDomains(mailOptions.bcc, domainMap);
+
+      // look up the domain map mx records
+      return lookupMx(domainMap).then(dmap => {
+        return promiseMap(dmap, ({ addrs, mx }, domain) => {
+          debug({ addrs, mx, domain });
+          const tOpts = _.find(transportOptions, (opts, name) => {
+            return _.toLower(name) === _.toLower(domain);
+          }) || {};
+
+          return promiseMap(addrs, addr => {
+            const mail = _.merge({}, mailOptions, {
               to,
               cc,
-              o,
-              relayOpts,
-              _.clone(mx),
-              sendInfo,
-              resolve,
-              reject
-            );
+              bcc: '',
+              envelope: {
+                from,
+                to: addr,
+                cc: '',
+                bcc: ''
+              }
+            });
+            return send(mail, tOpts, mx, summary);
           });
         });
-        return Promise.all(sends);
+      })
+      .then(() => {
+        cb(null, summary);
+        return resolve(summary);
+      })
+      .catch(err => {
+        cb(err);
+        return reject(err);
       });
-      return Promise.all(domains);
-    })
-    .then(() => {
-      return cb(undefined, sendInfo);
-    })
-    .catch(cb);
-  } catch (relayErr) {
-    return cb(relayErr);
-  }
+    } catch (err) {
+      cb(err);
+      return reject(err);
+    }
+  });
 }
 
 /**

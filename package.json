@@ -1,6 +1,6 @@
 {
   "name": "nodemailer-relay",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Relay SMTP using nodemailer",
   "main": "index.js",
   "options": {
@@ -24,9 +24,11 @@
   ],
   "author": "Branden Horiuchi <bhoriuchi@gmail.com>",
   "license": "MIT",
-  "dependencies": {
-    "lodash": "^4.17.4",
+  "peerDependencies": {
     "nodemailer": "^4.4.1"
+  },
+  "dependencies": {
+    "lodash": "^4.17.4"
   },
   "devDependencies": {
     "babel-cli": "^6.26.0",
